@@ -5,9 +5,9 @@ import openpyxl
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
-
-#1. 그래프 이론 기반 파싱 및 유틸리티
-
+# =====================================================================
+# [1] 그래프 이론 기반 정밀 파싱 및 유틸리티
+# =====================================================================
 def tokenize_smiles(smiles):
     tokens = []
     i, L = 0, len(smiles)
@@ -196,14 +196,21 @@ def advanced_split_substituent(sub, bond_counts):
         t = tokens[i]
         if t in ['O', 'o', 'N', 'n', 'S', 's']:
             bond_prefix = current_piece.pop() if current_piece and current_piece[-1] in ['=', '#'] else ""
+            
+            # [버그 수정 완료] 에스터 판단 로직 정교화
+            is_ester = False
+            if t in ['O', 'o']:
+                piece_str = ''.join(current_piece)
+                # 이전 조각에 카르보닐(C(=O) 혹은 C=) 구조가 명확히 인접해 있을 때만 에스터로 취급
+                if '(=O)' in piece_str or 'C(=O' in piece_str or piece_str.endswith('C='):
+                    is_ester = True
+
             if current_piece:
                 results.append(clean_substituent('R' + ''.join(current_piece)))
                 current_piece = []
             
             bond_type = None
             if t in ['O', 'o']:
-                is_ester = (len(results) > 0 and ('=O' in results[-1] or 'O=' in results[-1])) or bond_prefix == '='
-                if i + 3 < L and tokens[i+1] == '(' and tokens[i+2] == '=' and tokens[i+3] in ['O', 'o']: is_ester = True
                 bond_type = "Ester" if is_ester else "Ether"
             elif t in ['N', 'n']: bond_type = "Amine"
             elif t in ['S', 's']: bond_type = "Sulfide"
@@ -234,7 +241,7 @@ def advanced_split_substituent(sub, bond_counts):
 def run_molecule_analysis_pipeline(smiles, functional_group_db, score_db, rdkit_res=None):
     atoms, adj, bonds, ring_pairs, stereo_counts = build_smiles_graph(smiles)
     
-    #파서의 토큰 기반으로 탄소 개수 계산
+    # 순수 파이썬 파서의 토큰 기반으로 총 탄소(C, c) 개수 계산
     total_carbons = sum(1 for a in atoms if a.upper() == 'C')
     
     all_rings = find_all_rings(atoms, adj, ring_pairs)
@@ -333,9 +340,9 @@ def run_molecule_analysis_pipeline(smiles, functional_group_db, score_db, rdkit_
         )
     return res
 
-
-#2. 파일 로드 및 한글 변환 스코어링 모듈
-
+# =====================================================================
+# [2] 파일 로드 및 한글 변환 스코어링 모듈
+# =====================================================================
 @st.cache_data
 def load_functional_group_db(filename):
     try:
@@ -363,31 +370,19 @@ def load_score_table(filename):
         return {}
 
 def calculate_scores(functional_groups_count, score_db, original_rings=None, rdkit_res=None, total_carbons=0):
-
+    # 한글 키로 초기화
     total = {
-        "극성": 0,
-        "소수성": 0,
-        "수소결합 주개": 0,
-        "수소결합 받개": 0,
-        "혈뇌장벽 투과성": 0,
-        "산도": 0,
-        "염기도": 0,
-        "입체장애": 0
+        "극성": 0, "소수성": 0, "수소결합 주개": 0, "수소결합 받개": 0,
+        "혈뇌장벽 투과성": 0, "산도": 0, "염기도": 0, "입체장애": 0
     }
     
-    # 엑셀의 영어 행 키와 매칭할 한글 키 사전 구축
     key_map = {
-        "polarity": "극성",
-        "hydrophobicity": "소수성",
-        "hbond_donor": "수소결합 주개",
-        "hbond_acceptor": "수소결합 받개",
-        "bbb": "혈뇌장벽 투과성",
-        "acidity": "산도",
-        "basicity": "염기도",
-        "steric": "입체장애"
+        "polarity": "극성", "hydrophobicity": "소수성", "hbond_donor": "수소결합 주개",
+        "hbond_acceptor": "수소결합 받개", "bbb": "혈뇌장벽 투과성",
+        "acidity": "산도", "basicity": "염기도", "steric": "입체장애"
     }
     
-    # 1. 작용기 점수 누적 (엑셀 데이터 기반)
+    # 1. 작용기 점수 누적
     for group_name, count in functional_groups_count.items():
         for pattern, data in score_db.items():
             if data["group_name"] == group_name:
@@ -395,41 +390,33 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
                     total[kor_key] += data[eng_key] * count
                 break
                 
-    # 2. 고리 골격 기반 원자 가산
+    # 2. 고리 골격 원자 가산
     if original_rings:
         for ring in original_rings:
             atoms_in_ring = ring[1:]
             for atom in atoms_in_ring:
                 atom_upper = str(atom).upper()
                 if 'N' in atom_upper: 
-                    total["극성"] += 1
-                    total["수소결합 받개"] += 1
-                    total["염기도"] += 1
-                    total["혈뇌장벽 투과성"] -= 1
+                    total["극성"] += 1; total["수소결합 받개"] += 1; total["염기도"] += 1; total["혈뇌장벽 투과성"] -= 1
                 elif 'O' in atom_upper: 
-                    total["극성"] += 1
-                    total["수소결합 받개"] += 1
-                    total["산도"] += 1
-                    total["혈뇌장벽 투과성"] -= 1
+                    total["극성"] += 1; total["수소결합 받개"] += 1; total["산도"] += 1; total["혈뇌장벽 투과성"] -= 1
                 elif 'C' in atom_upper or 'S' in atom_upper: 
-                    total["소수성"] += 1
-                    total["입체장애"] += 1
+                    total["소수성"] += 1; total["입체장애"] += 1
                     
-    # 3. [탄소 보너스 엔진] 총 탄소 개수에 따른 어드밴티지 가산
+    # 3. [탄소 보너스] 총 탄소 개수에 따른 지질성/입체장애 가산
     total["소수성"] += total_carbons // 4
     total["입체장애"] += total_carbons // 5
                     
-    # 4. RDKit 분자량 조건 연산 및 BBB 페널티 상쇄 보정
+    # 4. RDKit 분자량 조건 정밀 연산 및 BBB 페널티 상쇄 보정
     if rdkit_res and "mw" in rdkit_res:
         mw = rdkit_res["mw"]
         total["입체장애"] += int(mw // 100)
         total["극성"] += int(mw // 150)
         
         if mw > 500:
-            
             if total_carbons >= 35:
-                total["혈뇌장벽 투과성"] += 0          
-                total["소수성"] += 4           
+                total["혈뇌장벽 투과성"] += 0          # 거대 지용성 분자 페널티 무력화
+                total["소수성"] += 4                   # 지질성 보너스 가산
             else:
                 total["혈뇌장벽 투과성"] -= 2
                 total["소수성"] += 1
@@ -438,9 +425,9 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
             
     return total
 
-
-#3. RDKit 기초 특성 프로파일링 
-
+# =====================================================================
+# [3] RDKit 기초 특성 프로파일링
+# =====================================================================
 def analyze_rdkit_properties(smiles):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None: return None
@@ -450,12 +437,12 @@ def analyze_rdkit_properties(smiles):
         "logp": Descriptors.MolLogP(mol),
         "hbd": Descriptors.NumHDonors(mol),
         "hba": Descriptors.NumHAcceptors(mol),
-        "rings": []
+        "rings": [] # PART 2에서 커스텀 그래프 기반으로 출력하므로 비워둠
     }
 
-
-#4. 약물 계열 예측 모듈 
-
+# =====================================================================
+# [4] 약물 계열 예측 모듈
+# =====================================================================
 def predict_drug_class(smiles, rdkit_res, custom_res):
     predicted_classes = []
     mol = Chem.MolFromSmiles(smiles)
@@ -526,13 +513,13 @@ def predict_drug_class(smiles, rdkit_res, custom_res):
     return list(set(predicted_classes))
 
 
-
-#5. Streamlit 웹 애플리케이션 프론트엔드 UI
-
+# =====================================================================
+# [5] Streamlit 웹 애플리케이션 프론트엔드 UI
+# =====================================================================
 st.set_page_config(page_title="Ultimate Molecule Profiler", layout="wide")
 
 def main():
-    st.title("Ultimate Molecule Profiler")
+    st.title("🔬 Ultimate Molecule Profiler")
     st.markdown("그래프 이론 및 RDKit 하이브리드 화합물 분석 대시보드")
     
     EXCEL_FILE = "functional_group_score_table.xlsx"
@@ -540,7 +527,7 @@ def main():
     score_db = load_score_table(EXCEL_FILE)
     
     if not fg_db:
-        st.warning("'functional_group_score_table.xlsx' 파일을 찾을 수 없어 작용기 매칭 및 점수 산출이 제한됩니다.")
+        st.warning("⚠️ 'functional_group_score_table.xlsx' 파일을 찾을 수 없어 작용기 매칭 및 점수 산출이 제한됩니다.")
     
     st.markdown("---")
     
@@ -552,18 +539,18 @@ def main():
             
             rdkit_res = analyze_rdkit_properties(smiles_input.strip())
             if rdkit_res is None:
-                st.error("유효하지 않은 SMILES 문자열입니다. 다시 입력해주세요.")
+                st.error("❌ 유효하지 않은 SMILES 문자열입니다. 다시 입력해주세요.")
                 return
                 
             custom_res = run_molecule_analysis_pipeline(smiles_input.strip(), fg_db, score_db, rdkit_res)
             predicted_drug_classes = predict_drug_class(smiles_input.strip(), rdkit_res, custom_res)
             
-            st.success("분석 완료")
+            st.success("✅ 분석 완료!")
             
-            
-            # 1) 기초 물리화학적 특성
-            
-            st.subheader(" PART 1. 기초 물리화학적 특성 (RDKit)")
+            # ----------------------------------------------------------
+            # [PART 1] 기초 물리화학적 특성
+            # ----------------------------------------------------------
+            st.subheader("📊 PART 1. 기초 물리화학적 특성 (RDKit)")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("분자량(MW)", f"{rdkit_res['mw']:.2f} g/mol")
             col2.metric("지질친화성(LogP)", f"{rdkit_res['logp']:.2f}")
@@ -572,10 +559,10 @@ def main():
             
             st.divider()
             
-           
-            # 2) 고리 시스템 프로파일링 (SMILES 고리 넘버 기준)
-           
-            st.subheader("PART 2. 고리 시스템 프로파일링")
+            # ----------------------------------------------------------
+            # [PART 2] 고리 시스템 프로파일링
+            # ----------------------------------------------------------
+            st.subheader("💍 PART 2. 고리 시스템 프로파일링")
             if custom_res.get('original_rings'):
                 for ring_info in custom_res['original_rings']:
                     ring_num = ring_info[0]
@@ -601,10 +588,10 @@ def main():
                 
             st.divider()
             
-          
-            # 3) 정밀 입체/작용기/결합 분석
-       
-            st.subheader("PART 3. 정밀 입체/작용기/결합 분석 (Graph Theory)")
+            # ----------------------------------------------------------
+            # [PART 3] 정밀 입체/작용기/결합 분석
+            # ----------------------------------------------------------
+            st.subheader("🧩 PART 3. 정밀 입체/작용기/결합 분석 (Graph Theory)")
             col_a, col_b, col_c = st.columns(3)
             
             with col_a:
@@ -634,22 +621,21 @@ def main():
                 
             st.divider()
             
-         
-            # 4) 작용기 기반 환산 점수 
-         
+            # ----------------------------------------------------------
+            # [PART 4] 작용기 기반 환산 점수
+            # ----------------------------------------------------------
             if custom_res.get("property_scores"):
-                st.subheader("PART 4. 작용기 기반 환산 점수")
+                st.subheader("📈 PART 4. 작용기 기반 환산 점수")
                 score_cols = st.columns(4)
                 scores = list(custom_res["property_scores"].items())
                 for i, (k, v) in enumerate(scores):
-                    
                     score_cols[i % 4].metric(k, v)
                 st.divider()
                 
-           
-            # 5) 구조 기반 약물 계열 예측
-           
-            st.subheader("PART 5. 구조 기반 약물 계열 예측")
+            # ----------------------------------------------------------
+            # [PART 5] 구조 기반 약물 계열 예측
+            # ----------------------------------------------------------
+            st.subheader("🎯 PART 5. 구조 기반 약물 계열 예측")
             for p_class in predicted_drug_classes:
                 if "조건에 부합하는 특징이 없어" in p_class:
                     st.warning(p_class)
@@ -658,3 +644,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+                
+           
+            
