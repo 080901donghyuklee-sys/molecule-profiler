@@ -185,6 +185,7 @@ def reconstruct_substituent_smiles(atoms, adj, bonds, start, avoid, original_rin
         return res
     return build_str(start)
 
+# 💡 [핵심 버그 수정 완료] 에스터 vs 에테르 정밀 판별 로직 적용
 def advanced_split_substituent(sub, bond_counts):
     if not sub: return []
     pure_sub = sub[1:] if sub[0] in ['R', 'r'] else sub
@@ -197,28 +198,40 @@ def advanced_split_substituent(sub, bond_counts):
         if t in ['O', 'o', 'N', 'n', 'S', 's']:
             bond_prefix = current_piece.pop() if current_piece and current_piece[-1] in ['=', '#'] else ""
             
-            # [버그 수정 완료] 에스터 판단 로직 정교화
-            is_ester = False
-            if t in ['O', 'o']:
-                piece_str = ''.join(current_piece)
-                # 이전 조각에 카르보닐(C(=O) 혹은 C=) 구조가 명확히 인접해 있을 때만 에스터로 취급
-                if '(=O)' in piece_str or 'C(=O' in piece_str or piece_str.endswith('C='):
-                    is_ester = True
-
             if current_piece:
                 results.append(clean_substituent('R' + ''.join(current_piece)))
                 current_piece = []
             
             bond_type = None
             if t in ['O', 'o']:
-                bond_type = "Ester" if is_ester else "Ether"
-            elif t in ['N', 'n']: bond_type = "Amine"
-            elif t in ['S', 's']: bond_type = "Sulfide"
+                # 알데히드/케톤 등 이중결합(=O) 산소는 에테르/에스터 카운트에서 완전 배제
+                if bond_prefix == '=' or (i+1 < L and tokens[i+1] == '='):
+                    bond_type = None
+                else:
+                    is_ester = False
+                    left_str = "".join(tokens[:i])
+                    right_str = "".join(tokens[i+1:])
+                    
+                    # 정규식을 활용해 괄호()를 무시하고 산소(O) 앞/뒤에 카르보닐기(C=O)가 붙어있는지 완벽 검증
+                    if re.search(r'[Cc](?:\([^)]*\))*\(=O\)$', left_str) or left_str.endswith("C=O") or left_str.endswith("c=O"):
+                        is_ester = True
+                    elif right_str.startswith("C(=O)") or right_str.startswith("c(=O)") or right_str.startswith("C=O") or right_str.startswith("c=O"):
+                        is_ester = True
+                        
+                    bond_type = "Ester" if is_ester else "Ether"
+                    
+            elif t in ['N', 'n']: 
+                bond_type = "Amine"
+            elif t in ['S', 's']: 
+                bond_type = "Sulfide"
                 
-            if bond_type: bond_counts[bond_type] = bond_counts.get(bond_type, 0) + 1
+            if bond_type: 
+                bond_counts[bond_type] = bond_counts.get(bond_type, 0) + 1
+                
             if bond_prefix: current_piece.append(bond_prefix)
             current_piece.append(t)
             i += 1; continue
+            
         elif t == '(':
             if current_piece:
                 results.append(clean_substituent('R' + ''.join(current_piece)))
@@ -240,8 +253,6 @@ def advanced_split_substituent(sub, bond_counts):
 
 def run_molecule_analysis_pipeline(smiles, functional_group_db, score_db, rdkit_res=None):
     atoms, adj, bonds, ring_pairs, stereo_counts = build_smiles_graph(smiles)
-    
-    # 순수 파이썬 파서의 토큰 기반으로 총 탄소(C, c) 개수 계산
     total_carbons = sum(1 for a in atoms if a.upper() == 'C')
     
     all_rings = find_all_rings(atoms, adj, ring_pairs)
@@ -370,7 +381,6 @@ def load_score_table(filename):
         return {}
 
 def calculate_scores(functional_groups_count, score_db, original_rings=None, rdkit_res=None, total_carbons=0):
-    # 한글 키로 초기화
     total = {
         "극성": 0, "소수성": 0, "수소결합 주개": 0, "수소결합 받개": 0,
         "혈뇌장벽 투과성": 0, "산도": 0, "염기도": 0, "입체장애": 0
@@ -382,7 +392,6 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
         "acidity": "산도", "basicity": "염기도", "steric": "입체장애"
     }
     
-    # 1. 작용기 점수 누적
     for group_name, count in functional_groups_count.items():
         for pattern, data in score_db.items():
             if data["group_name"] == group_name:
@@ -390,7 +399,6 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
                     total[kor_key] += data[eng_key] * count
                 break
                 
-    # 2. 고리 골격 원자 가산
     if original_rings:
         for ring in original_rings:
             atoms_in_ring = ring[1:]
@@ -403,11 +411,9 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
                 elif 'C' in atom_upper or 'S' in atom_upper: 
                     total["소수성"] += 1; total["입체장애"] += 1
                     
-    # 3. [탄소 보너스] 총 탄소 개수에 따른 지질성/입체장애 가산
     total["소수성"] += total_carbons // 4
     total["입체장애"] += total_carbons // 5
                     
-    # 4. RDKit 분자량 조건 정밀 연산 및 BBB 페널티 상쇄 보정
     if rdkit_res and "mw" in rdkit_res:
         mw = rdkit_res["mw"]
         total["입체장애"] += int(mw // 100)
@@ -415,8 +421,8 @@ def calculate_scores(functional_groups_count, score_db, original_rings=None, rdk
         
         if mw > 500:
             if total_carbons >= 35:
-                total["혈뇌장벽 투과성"] += 0          # 거대 지용성 분자 페널티 무력화
-                total["소수성"] += 4                   # 지질성 보너스 가산
+                total["혈뇌장벽 투과성"] += 0          
+                total["소수성"] += 4                   
             else:
                 total["혈뇌장벽 투과성"] -= 2
                 total["소수성"] += 1
@@ -437,7 +443,7 @@ def analyze_rdkit_properties(smiles):
         "logp": Descriptors.MolLogP(mol),
         "hbd": Descriptors.NumHDonors(mol),
         "hba": Descriptors.NumHAcceptors(mol),
-        "rings": [] # PART 2에서 커스텀 그래프 기반으로 출력하므로 비워둠
+        "rings": [] 
     }
 
 # =====================================================================
@@ -644,6 +650,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-                
-           
-            
